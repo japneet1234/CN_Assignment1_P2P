@@ -1,2 +1,4 @@
 seed
 peer
+seed_output_*.txt
+peer_*.txt
