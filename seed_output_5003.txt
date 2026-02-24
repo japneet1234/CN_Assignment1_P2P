@@ -1,7 +1,0 @@
-[Tue Feb 24 19:07:29 2026] Seed node initialized on port 5003
-[Tue Feb 24 19:07:43 2026] REGISTRATION: Peer 127.0.0.1:6001 registered
-[Tue Feb 24 19:07:43 2026] Sent peer list to client with 1 peers
-[Tue Feb 24 19:07:54 2026] REGISTRATION: Peer 127.0.0.1:6002 registered
-[Tue Feb 24 19:07:54 2026] Sent peer list to client with 2 peers
-[Tue Feb 24 19:08:00 2026] REGISTRATION: Peer 127.0.0.1:6003 registered
-[Tue Feb 24 19:08:00 2026] Sent peer list to client with 3 peers
