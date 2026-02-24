@@ -1,0 +1,6 @@
+# Ignore Linux/macOS binaries
+*.out
+*.o
+*.so
+*.a
+*.bin
