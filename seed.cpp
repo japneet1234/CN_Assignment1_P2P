@@ -37,6 +37,9 @@ private:
     int seedPort;
     map<string, PeerInfo> peerList;
     mutex peerListMutex;
+
+    map<string, set<string>> deadNodeReporterVotes;
+    mutex removalConsensusMutex;
     
     int serverSocket;
     vector<thread> threadPool;
@@ -52,9 +55,12 @@ private:
     queue<string> pendingRegistrations;
     queue<string> pendingRemovals;
 
+    int requiredRemovalReports;
+
 public:
     SeedNode(int port, string outputFile) : seedPort(port), logFileName(outputFile) {
         serverSocket = -1;
+        requiredRemovalReports = 2;
         initializeServer();
     }
     
@@ -167,16 +173,36 @@ public:
         logMessage("Sent peer list to client with " + to_string(peerList.size()) + " peers");
     }
     
-    void handleDeadNodeReport(const string& deadNodeIp, int deadNodePort, 
-                             const string& reporterIp, const string& timestamp) {
+    void handleDeadNodeReport(const string& deadNodeIp, int deadNodePort,
+                             const string& reporterNode, const string& timestamp) {
         string key = deadNodeIp + ":" + to_string(deadNodePort);
-        
+
+        string reporterKey = reporterNode;
+        {
+            lock_guard<mutex> voteLock(removalConsensusMutex);
+            deadNodeReporterVotes[key].insert(reporterKey);
+            int currentVotes = (int)deadNodeReporterVotes[key].size();
+            logMessage("REMOVAL VOTE: " + key + " reported by " + reporterNode +
+                       " at " + timestamp + " (votes=" + to_string(currentVotes) +
+                       "/" + to_string(requiredRemovalReports) + ")");
+        }
+
+        bool removeNow = false;
+        {
+            lock_guard<mutex> voteLock(removalConsensusMutex);
+            removeNow = ((int)deadNodeReporterVotes[key].size() >= requiredRemovalReports);
+        }
+
+        if (!removeNow) {
+            return;
+        }
+
         lock_guard<mutex> lock(peerListMutex);
-        
-        if (peerList.find(key) != peerList.end()) {
+
+        if (peerList.find(key) != peerList.end() && peerList[key].isActive) {
             peerList[key].isActive = false;
-            logMessage("REMOVAL: Dead node " + deadNodeIp + ":" + to_string(deadNodePort) + 
-                      " reported by " + reporterIp + " at " + timestamp);
+            logMessage("REMOVAL CONSENSUS: Dead node " + deadNodeIp + ":" + to_string(deadNodePort) +
+                       " removed after " + to_string(requiredRemovalReports) + "+ independent reports");
         }
     }
     
@@ -208,14 +234,14 @@ public:
             handlePeerListRequest(clientSocket);
         }
         else if (command == "DEADNODE") {
-            string deadNodeIpPort, timestamp, reporterIp;
-            ss >> deadNodeIpPort >> timestamp >> reporterIp;
+            string deadNodeIpPort, timestamp, reporterNode;
+            ss >> deadNodeIpPort >> timestamp >> reporterNode;
             
             int colonPos = deadNodeIpPort.find(':');
             string deadIp = deadNodeIpPort.substr(0, colonPos);
             int deadPort = stoi(deadNodeIpPort.substr(colonPos + 1));
             
-            handleDeadNodeReport(deadIp, deadPort, reporterIp, timestamp);
+            handleDeadNodeReport(deadIp, deadPort, reporterNode, timestamp);
         }
         
         close(clientSocket);
