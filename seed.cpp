@@ -39,6 +39,8 @@ private:
     mutex peerListMutex;
 
     map<string, set<string>> deadNodeReporterVotes;
+    map<string, set<string>> deadNodeSeedVotes;
+    set<string> selfSeedVoted;
     mutex removalConsensusMutex;
     
     int serverSocket;
@@ -56,11 +58,14 @@ private:
     queue<string> pendingRemovals;
 
     int requiredRemovalReports;
+    int requiredSeedVotes;
 
 public:
-    SeedNode(int port, string outputFile) : seedPort(port), logFileName(outputFile) {
+    SeedNode(int port, string outputFile, const string& seedConfigPath) : seedPort(port), logFileName(outputFile) {
         serverSocket = -1;
         requiredRemovalReports = 2;
+        loadSeedConfig(seedConfigPath);
+        requiredSeedVotes = ((int)otherSeeds.size() + 1) / 2 + 1;
         initializeServer();
     }
     
@@ -95,6 +100,113 @@ public:
         
         listen(serverSocket, 20);
         logMessage("Seed node initialized on port " + to_string(seedPort));
+        logMessage("Seed removal quorum set to " + to_string(requiredSeedVotes) +
+                   " out of total seeds=" + to_string((int)otherSeeds.size() + 1));
+    }
+
+    void loadSeedConfig(const string& configPath) {
+        ifstream file(configPath);
+        if (!file.is_open()) {
+            logMessage("Could not read seed config at " + configPath + ", using standalone mode");
+            return;
+        }
+
+        string line;
+        while (getline(file, line)) {
+            if (line.empty() || line[0] == '#') {
+                continue;
+            }
+
+            size_t colon = line.find(':');
+            if (colon == string::npos) {
+                continue;
+            }
+
+            string ip = line.substr(0, colon);
+            int port = stoi(line.substr(colon + 1));
+            if (port != seedPort) {
+                otherSeeds.push_back({ip, port});
+            }
+        }
+    }
+
+    void maybeApplyRemovalConsensus(const string& key, const string& deadNodeIp, int deadNodePort) {
+        bool canRemove = false;
+        {
+            lock_guard<mutex> voteLock(removalConsensusMutex);
+            canRemove = ((int)deadNodeSeedVotes[key].size() >= requiredSeedVotes);
+        }
+
+        if (!canRemove) {
+            return;
+        }
+
+        lock_guard<mutex> lock(peerListMutex);
+        if (peerList.find(key) != peerList.end() && peerList[key].isActive) {
+            peerList[key].isActive = false;
+            logMessage("REMOVAL CONSENSUS: Dead node " + deadNodeIp + ":" + to_string(deadNodePort) +
+                       " removed after seed quorum votes=" + to_string(requiredSeedVotes));
+        }
+    }
+
+    void broadcastSeedVote(const string& deadNodeIp, int deadNodePort) {
+        string voteMessage = "SEEDVOTE_REMOVE " + deadNodeIp + ":" + to_string(deadNodePort) +
+                             " " + to_string(seedPort);
+
+        for (const auto& seed : otherSeeds) {
+            int sock = socket(AF_INET, SOCK_STREAM, 0);
+            if (sock < 0) {
+                continue;
+            }
+
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = inet_addr(seed.first.c_str());
+            addr.sin_port = htons(seed.second);
+
+            if (connect(sock, (sockaddr*)&addr, sizeof(addr)) < 0) {
+                close(sock);
+                continue;
+            }
+
+            send(sock, voteMessage.c_str(), voteMessage.size(), 0);
+            close(sock);
+        }
+    }
+
+    void castSelfSeedVoteIfNeeded(const string& key, const string& deadNodeIp, int deadNodePort) {
+        bool newlyVoted = false;
+        {
+            lock_guard<mutex> voteLock(removalConsensusMutex);
+            if (selfSeedVoted.find(key) == selfSeedVoted.end()) {
+                selfSeedVoted.insert(key);
+                deadNodeSeedVotes[key].insert(to_string(seedPort));
+                newlyVoted = true;
+                logMessage("SEED VOTE: cast local vote for " + key +
+                           " (seedVotes=" + to_string((int)deadNodeSeedVotes[key].size()) +
+                           "/" + to_string(requiredSeedVotes) + ")");
+            }
+        }
+
+        if (!newlyVoted) {
+            return;
+        }
+
+        broadcastSeedVote(deadNodeIp, deadNodePort);
+        maybeApplyRemovalConsensus(key, deadNodeIp, deadNodePort);
+    }
+
+    void handleSeedVoteMessage(const string& deadNodeIp, int deadNodePort, const string& voterSeedPort) {
+        string key = deadNodeIp + ":" + to_string(deadNodePort);
+        {
+            lock_guard<mutex> voteLock(removalConsensusMutex);
+            deadNodeSeedVotes[key].insert(voterSeedPort);
+            logMessage("SEED VOTE RECEIVED: " + key + " from seed " + voterSeedPort +
+                       " (seedVotes=" + to_string((int)deadNodeSeedVotes[key].size()) +
+                       "/" + to_string(requiredSeedVotes) + ")");
+        }
+
+        maybeApplyRemovalConsensus(key, deadNodeIp, deadNodePort);
     }
     
     void logMessage(const string& message) {
@@ -197,13 +309,7 @@ public:
             return;
         }
 
-        lock_guard<mutex> lock(peerListMutex);
-
-        if (peerList.find(key) != peerList.end() && peerList[key].isActive) {
-            peerList[key].isActive = false;
-            logMessage("REMOVAL CONSENSUS: Dead node " + deadNodeIp + ":" + to_string(deadNodePort) +
-                       " removed after " + to_string(requiredRemovalReports) + "+ independent reports");
-        }
+        castSelfSeedVoteIfNeeded(key, deadNodeIp, deadNodePort);
     }
     
     void handleClientConnection(int clientSocket) {
@@ -216,6 +322,31 @@ public:
         }
         
         string request(buffer);
+
+        if (request.rfind("Dead Node:", 0) == 0) {
+            string payload = request.substr(strlen("Dead Node:"));
+            stringstream deadSs(payload);
+            string deadIp, deadPortStr, timestamp, reporterIp, reporterPort;
+            getline(deadSs, deadIp, ':');
+            getline(deadSs, deadPortStr, ':');
+            getline(deadSs, timestamp, ':');
+            getline(deadSs, reporterIp, ':');
+            getline(deadSs, reporterPort, ':');
+
+            if (!deadIp.empty() && !deadPortStr.empty() && !timestamp.empty() && !reporterIp.empty()) {
+                int deadPort = stoi(deadPortStr);
+                string reporterKey = reporterIp;
+                if (!reporterPort.empty()) {
+                    reporterKey += ":" + reporterPort;
+                } else {
+                    reporterKey += "@" + timestamp;
+                }
+                handleDeadNodeReport(deadIp, deadPort, reporterKey, timestamp);
+            }
+
+            close(clientSocket);
+            return;
+        }
         stringstream ss(request);
         string command;
         ss >> command;
@@ -242,6 +373,17 @@ public:
             int deadPort = stoi(deadNodeIpPort.substr(colonPos + 1));
             
             handleDeadNodeReport(deadIp, deadPort, reporterNode, timestamp);
+        }
+        else if (command == "SEEDVOTE_REMOVE") {
+            string deadNodeIpPort, voterSeedPort;
+            ss >> deadNodeIpPort >> voterSeedPort;
+
+            int colonPos = deadNodeIpPort.find(':');
+            if (colonPos != string::npos) {
+                string deadIp = deadNodeIpPort.substr(0, colonPos);
+                int deadPort = stoi(deadNodeIpPort.substr(colonPos + 1));
+                handleSeedVoteMessage(deadIp, deadPort, voterSeedPort);
+            }
         }
         
         close(clientSocket);
@@ -278,14 +420,18 @@ public:
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        cerr << "Usage: ./seed <port>" << endl;
+        cerr << "Usage: ./seed <port> [seed_config_file]" << endl;
         return 1;
     }
     
     int port = stoi(argv[1]);
     string outputFile = "seed_output_" + to_string(port) + ".txt";
+    string configPath = "config.txt";
+    if (argc >= 3) {
+        configPath = argv[2];
+    }
     
-    SeedNode seed(port, outputFile);
+    SeedNode seed(port, outputFile, configPath);
     seed.startListening();
     
     return 0;

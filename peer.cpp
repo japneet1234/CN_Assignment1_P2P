@@ -680,8 +680,8 @@ public:
                 continue;
             }
 
-            string report = "DEADNODE " + deadIp + ":" + to_string(deadPort) + " " +
-                           to_string(t) + " " + selfIp + ":" + to_string(selfPort);
+            string report = "Dead Node:" + deadIp + ":" + to_string(deadPort) + ":" +
+                           to_string(t) + ":" + selfIp + ":" + to_string(selfPort);
             send(sock, report.c_str(), report.size(), 0);
             close(sock);
 
