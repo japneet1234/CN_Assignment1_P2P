@@ -1,7 +1,4 @@
-# Seed Node Configuration File
-# Format: IP:Port
 # Each line contains the IP address and port of a seed node
-# Lines starting with # are comments
 
 127.0.0.1:5001
 127.0.0.1:5002
