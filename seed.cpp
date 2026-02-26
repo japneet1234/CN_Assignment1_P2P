@@ -57,13 +57,11 @@ private:
     queue<string> pendingRegistrations;
     queue<string> pendingRemovals;
 
-    int requiredRemovalReports;
     int requiredSeedVotes;
 
 public:
     SeedNode(int port, string outputFile, const string& seedConfigPath) : seedPort(port), logFileName(outputFile) {
         serverSocket = -1;
-        requiredRemovalReports = 2;
         loadSeedConfig(seedConfigPath);
         requiredSeedVotes = ((int)otherSeeds.size() + 1) / 2 + 1;
         initializeServer();
@@ -128,6 +126,27 @@ public:
                 otherSeeds.push_back({ip, port});
             }
         }
+    }
+
+    int getRequiredRemovalReports(const string& deadNodeKey) {
+        lock_guard<mutex> lock(peerListMutex);
+
+        int activeWitnesses = 0;
+        for (const auto& entry : peerList) {
+            if (!entry.second.isActive) {
+                continue;
+            }
+            if (entry.first == deadNodeKey) {
+                continue;
+            }
+            activeWitnesses++;
+        }
+
+        if (activeWitnesses <= 0) {
+            return 1;
+        }
+
+        return (activeWitnesses / 2) + 1;
     }
 
     void maybeApplyRemovalConsensus(const string& key, const string& deadNodeIp, int deadNodePort) {
@@ -288,6 +307,7 @@ public:
     void handleDeadNodeReport(const string& deadNodeIp, int deadNodePort,
                              const string& reporterNode, const string& timestamp) {
         string key = deadNodeIp + ":" + to_string(deadNodePort);
+        int requiredRemovalReports = getRequiredRemovalReports(key);
 
         string reporterKey = reporterNode;
         {

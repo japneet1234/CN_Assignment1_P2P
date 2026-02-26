@@ -2,29 +2,29 @@
 
 ## Overview
 
-This project implements a sophisticated peer-to-peer network system with the following key features:
+This project implements a peer-to-peer gossip network with the following implemented features:
 
-- **Consensus-based membership management**: New peers must be registered with a quorum (majority) of seed nodes
-- **Robust liveness detection**: Dead nodes are confirmed by multiple peers before reports are sent to seeds
+- **Quorum-based join decision at peer side**: A peer proceeds only after successful registration with majority of configured seeds
+- **Two-stage dead-node removal**: Peer-level suspicion/report threshold + seed-level quorum votes
 - **Gossip protocol**: Messages propagate through the network with duplicate prevention
-- **Power-law topology**: Network maintains a realistic degree distribution
+- **Dynamic randomized topology**: Neighbors are periodically refreshed from current seed membership
 - **Dual-level consensus**: Both peer-level and seed-level agreement for critical decisions
 
 ## Architecture
 
 ### Seed Nodes
 - Maintain a peer list (PL) of known peers
-- Accept peer registrations and validate them via consensus
+- Accept peer registrations and handle duplicate entries
 - Receive dead-node reports and validate before removal
 - Serve peer lists to joining peers
-- Help maintain network topology with power-law distribution
+- Exchange removal votes with other seeds before final dead-node removal
 
 ### Peer Nodes
 - Register with at least ⌈n/2⌉ + 1 seed nodes
-- Connect to randomly selected neighbors for overlay formation
+- Connect to randomly selected neighbors for overlay formation and periodic refresh
 - Generate and broadcast gossip messages every 5 seconds (max 10 messages)
 - Maintain a message list to prevent infinite loops
-- Periodically check neighbor liveness using ping
+- Periodically check neighbor liveness using TCP connect checks
 - Report dead nodes only after peer-level consensus
 - Listen for incoming gossip messages from neighbors
 
@@ -52,7 +52,7 @@ This project implements a sophisticated peer-to-peer network system with the fol
 
 ```bash
 # Navigate to the project directory
-cd cn_assignment1
+cd B23CS1022-B23CS1094
 
 # Compile seed node
 g++ -std=c++11 -pthread -o seed seed.cpp
@@ -105,6 +105,12 @@ Open new terminal windows and start peer nodes:
 
 # Terminal 6 - Peer node on 127.0.0.1:6003
 ./peer 127.0.0.1 6003 config.txt
+
+# Terminal 7 - Peer node on 127.0.0.1:6004
+./peer 127.0.0.1 6004 config.txt
+
+# Terminal 8 - Peer node on 127.0.0.1:6005
+./peer 127.0.0.1 6005 config.txt
 ```
 
 You can start as many peer nodes as desired. Each peer will:
@@ -130,29 +136,42 @@ Client → Seed: GETPEERLIST
 Seed → Client: PEERLIST:<IP1>:<Port1>,<IP2>:<Port2>,...
 ```
 
-#### Gossip Message
+#### Gossip Message (wire format)
 ```
-Peer → Neighbor: GOSSIP:<timestamp>:<IP>:<MsgNum>:<SenderIP>
+Peer → Neighbor: GOSSIP|<timestamp>:<originPeerIP>:<msgNum>|<forwarderIP>|<forwarderPort>
+```
+
+#### Suspicion Message (wire format)
+```
+Peer → Neighbor: SUSPECT|<deadIp>|<deadPort>|<reporterIp>|<reporterPort>
 ```
 
 #### Dead Node Report
 ```
-Peer → Seed: DEADNODE <DeadIP>:<DeadPort> <timestamp> <ReporterIP>
+Peer → Seed: Dead Node:<deadIp>:<deadPort>:<timestamp>:<reporterIp>:<reporterPort>
+```
+
+#### Seed Vote Exchange
+```
+Seed → Seed: SEEDVOTE_REMOVE <deadIp>:<deadPort> <voterSeedPort>
 ```
 
 ## Logging
 
 ### Seed Node Logs
-- Peer registration proposals and outcomes
-- Consensus decisions
-- Confirmed dead-node removals
-- Peer list updates
+- Peer registration and duplicate handling
+- Peer-list responses
+- Removal report vote counts
+- Seed-to-seed vote receipts
+- Quorum-based dead-node removals
 
 ### Peer Node Logs
 - Successful registrations with seeds
 - Received peer lists
 - Generated gossip messages
 - First-time gossip message receptions
+- Duplicate gossip suppression
+- Suspicion vote progress
 - Dead node detections
 - Reports sent to seeds
 
@@ -161,26 +180,28 @@ Logs are written to both console and output files for easy debugging.
 ## Key Features
 
 ### 1. Quorum-Based Consensus
-- Peers register with ⌈n/2⌉ + 1 seeds (n = total seeds)
-- Dead node removal requires consensus among seeds
-- Prevents malicious unilateral decisions
+- Peer startup requires successful registration with majority of configured seeds
+- Dead node removal at seeds requires:
+   - majority independent peer reports (active peers/2 + 1 report-vote threshold), then
+   - seed quorum votes (majority of total seeds)
 
 ### 2. Gossip Protocol
 - Message format: `<timestamp>:<IP>:<MsgNum>`
+- Wire format used for forwarding: `GOSSIP|<content>|<senderIp>|<senderPort>`
 - Automatic loop prevention via message list
 - 5-second intervals between broadcasts
 - Maximum 10 messages per peer
 
 ### 3. Liveness Detection
-- Peer-level checking via system ping
-- Consensus among neighbors before reporting
+- Peer-level checking via TCP connection attempts
+- Suspicion vote collection from peers before reporting
 - Seed-level validation before removal
-- Prevents false positives and Sybil attacks
+- Helps reduce false positives via thresholding
 
 ### 4. Network Topology
-- Power-law degree distribution
-- Dynamic neighbor selection
-- Automatic overlay formation
+- Random neighbor selection from seed-union peer list
+- Periodic neighbor refresh (every 8 seconds)
+- Stale neighbor pruning when peers disappear from seed lists
 
 ## Testing Tips
 
@@ -188,7 +209,7 @@ Logs are written to both console and output files for easy debugging.
 1. Start 3 seed nodes on localhost with different ports
 2. Start 5-10 peer nodes on different ports
 3. Verify logs for successful registrations and gossip messages
-4. Kill a peer node and verify dead node detection
+4. Kill a peer node and verify: suspicion votes -> dead-node reports -> seed votes -> quorum removal
 
 ### Multi-Machine Testing
 1. Update `config.txt` with actual seed node IPs
@@ -210,7 +231,7 @@ Logs are written to both console and output files for easy debugging.
 #### Gossip Propagation
 ```
 [Timestamp] GOSSIP RECEIVED: 1234567890:127.0.0.1:1 from 127.0.0.1
-[Timestamp] Message forwarded to 3 neighbors
+[Timestamp] Duplicate gossip message ignored: 1234567890:127.0.0.1:1
 ```
 
 #### Dead Node Detection
@@ -223,98 +244,31 @@ Logs are written to both console and output files for easy debugging.
 
 - **Message overhead**: Gossip messages are bounded to 10 per peer
 - **Network bandwidth**: Controlled by 5-second intervals
-- **Liveness check interval**: 3 seconds (configurable)
-- **Thread pool**: One thread per client connection + background threads
+- **Liveness check interval**: 3 seconds
+- **Neighbor refresh interval**: 8 seconds
 
-## Security Analysis
+## Security Notes
 
 ### Attack Mitigations
 
-1. **Sybil Attack Prevention**
-   - Quorum consensus required for registration
-   - Multiple seed nodes validate identities
+1. **Single-point failure reduction**
+   - Peer requires majority seed responses before joining
+   - Seed quorum required before final dead-node removal
 
-2. **False Death Reports**
+2. **False death report resistance**
    - Peer-level consensus before reporting
    - Seed-level consensus before removal
    - Multiple independent confirmations
 
-3. **Message Spoofing**
+3. **Message replay/loop resistance**
    - Sender IP included in all messages
    - Duplicate detection via message list
    - First-time message reception logged
 
-4. **Collusion**
-   - Threshold consensus (⌈n/2⌉ + 1) prevents majority compromise
-   - Two-level consensus prevents concentration of power
+4. **Two-level thresholding**
+   - Peer suspicion threshold + seed quorum threshold
 
-## Known Limitations
+## Group members
 
-1. No encryption (plaintext communication)
-2. No authentication beyond IP validation
-3. No Byzantine fault tolerance
-4. Ping-based liveness may have false positives on congested networks
-5. Power-law distribution maintained heuristically
-
-## Future Improvements
-
-1. TLS/SSL encryption for secure communication
-2. Digital signatures for message authentication
-3. Byzantine fault tolerance algorithms
-4. More sophisticated topology management
-5. Adaptive liveness check intervals
-6. Message prioritization
-7. NAT traversal support
-
-## Troubleshooting
-
-### Port Already in Use
-```bash
-# Find process using the port
-lsof -i :5001
-
-# Kill the process
-kill -9 <PID>
-```
-
-### Connection Refused
-- Verify seed nodes are running on specified ports
-- Check firewall settings
-- Ensure IP addresses in config.txt are correct
-
-### No Gossip Messages
-- Verify peers have connected to each other
-- Check neighbor connection logs
-- Ensure TCP connections are established
-
-### Dead Nodes Not Detected
-- Verify system has `ping` command
-- Check network connectivity
-- Adjust failure threshold if needed
-
-## References
-
-- Socket Programming: https://beej.us/guide/bgnet/html/split/
-- Gossip Protocols: https://en.wikipedia.org/wiki/Gossip_protocol
-- Consensus Algorithms: https://en.wikipedia.org/wiki/Consensus_(computer_science)
-- Power-law Networks: https://en.wikipedia.org/wiki/Scale-free_network
-
-## Submission
-
-All files are packaged as follows:
-- `seed.cpp` - Seed node source
-- `peer.cpp` - Peer node source
-- `config.txt` - Configuration file
-- `README.md` - This file
-- `seed_output_*.txt` - Seed logs (generated at runtime)
-- `peer_*.txt` - Peer logs (generated at runtime)
-
-Package as `rollno1-rollno2.tar.gz` for submission.
-
-## Authors
-
-Group members: [Your names here]
-
-## License
-
-This project is submitted as part of CSL3080 - Computer Networks course.
+   - Japneet Singh (B23CS1022)
+   - Naman Soni (B23CS1094)
