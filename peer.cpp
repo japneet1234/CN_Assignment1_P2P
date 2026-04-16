@@ -324,7 +324,7 @@ public:
         return out;
     }
 
-    void reconcileNeighbors(const vector<pair<string, int>>& peerList) {
+     void reconcileNeighbors(const vector<pair<string, int>>& peerList) {
         if (peerList.empty()) {
             logMessage("Neighbor refresh: no peers available yet");
             return;
@@ -332,21 +332,11 @@ public:
 
         set<pair<string, int>> activePeers(peerList.begin(), peerList.end());
 
-        vector<pair<string, int>> candidates = peerList;
-        random_device rd;
-        mt19937 gen(rd());
-        shuffle(candidates.begin(), candidates.end(), gen);
-
         int target = 0;
         if ((int)peerList.size() <= 6) {
             target = (int)peerList.size();
         } else {
             target = max(3, (int)peerList.size() / 3);
-        }
-
-        vector<pair<string, int>> selected;
-        for (int i = 0; i < (int)candidates.size() && (int)selected.size() < target; i++) {
-            selected.push_back(candidates[i]);
         }
 
         vector<pair<string, int>> newlyAdded;
@@ -359,8 +349,47 @@ public:
                 }),
                 neighbors.end());
 
-            for (const auto& p : selected) {
-                if (!hasNeighborUnlocked(p.first, p.second)) {
+            int neighborsNeeded = target - (int)neighbors.size();
+
+            if (neighborsNeeded > 0) {
+                vector<pair<string, int>> candidates = peerList;
+                sort(candidates.begin(), candidates.end());
+
+                random_device rd;
+                mt19937 gen(rd());
+                uniform_real_distribution<> dis(0.0, 1.0);
+
+                vector<pair<string, int>> selected;
+                for (size_t i = 0; i < candidates.size() && (int)selected.size() < neighborsNeeded; i++) {
+                    if (hasNeighborUnlocked(candidates[i].first, candidates[i].second) ||
+                        (candidates[i].first == selfIp && candidates[i].second == selfPort)) {
+                        continue;
+                    }
+
+                    double probability = 1.0 / (i + 1);
+                    double roll = dis(gen);
+
+                    if (roll <= probability) {
+                        selected.push_back(candidates[i]);
+                    }
+                }
+
+                for (size_t i = 0; i < candidates.size() && (int)selected.size() < neighborsNeeded; i++) {
+                    if (!hasNeighborUnlocked(candidates[i].first, candidates[i].second) &&
+                        !(candidates[i].first == selfIp && candidates[i].second == selfPort)) {
+                        
+                        bool alreadySelected = false;
+                        for(auto& s : selected) {
+                            if(s == candidates[i]) alreadySelected = true;
+                        }
+                        
+                        if(!alreadySelected) {
+                            selected.push_back(candidates[i]);
+                        }
+                    }
+                }
+
+                for (const auto& p : selected) {
                     neighbors.push_back({p.first, p.second, false, 0, false});
                     newlyAdded.push_back(p);
                 }
